@@ -11,7 +11,8 @@ import warnings
 import xml.etree.ElementTree as ET
 import html as html_lib
 import re
-
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(
     page_title="Monitor BDRs - Swing Trade",
