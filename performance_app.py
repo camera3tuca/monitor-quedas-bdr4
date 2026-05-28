@@ -88,15 +88,12 @@ def auto_load_csvs():
                         })
                         existentes_set.add(op_key)
         except Exception as e:
-            print(f"Erro ao auto-carregar {file}: {e}")
+            st.warning(f"Aviso: Não foi possível processar o arquivo automático '{file}'. Detalhes: {e}")
 
     if novas_operacoes:
         df_novas = pd.DataFrame(novas_operacoes)
         df_novas.to_sql('operacoes', conn_db, if_exists='append', index=False)
     conn_db.close()
-
-# Executa auto-load ao iniciar
-auto_load_csvs()
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(
@@ -104,6 +101,11 @@ st.set_page_config(
     page_icon="📈",
     layout="wide"
 )
+
+# Executa auto-load apenas uma vez por sessão
+if 'auto_loaded' not in st.session_state:
+    auto_load_csvs()
+    st.session_state['auto_loaded'] = True
 
 st.markdown('<h1 class="main-title">📈 Performance da Carteira</h1>', unsafe_allow_html=True)
 st.markdown('<h3 class="section-header">📁 Importar Notas de Corretagem</h3>', unsafe_allow_html=True)
@@ -250,8 +252,17 @@ with col_rst:
                 df_restore = pd.read_csv(uploaded_backup)
                 # Verifica se as colunas essenciais existem no arquivo
                 if 'data' in df_restore.columns and 'ticker' in df_restore.columns and 'tipo' in df_restore.columns:
+                    # Garantir que não vamos inserir a coluna 'id' se ela vier do CSV,
+                    # para que o banco gere um novo ID através do AUTOINCREMENT.
+                    if 'id' in df_restore.columns:
+                        df_restore = df_restore.drop(columns=['id'])
+
                     conn = sqlite3.connect('portfolio.db')
-                    df_restore.to_sql('operacoes', conn, if_exists='replace', index=False)
+                    # Deleta todos os registros para não perder a estrutura original (PRIMARY KEY)
+                    conn.execute("DELETE FROM operacoes")
+                    # Faz o append preservando o schema com AUTOINCREMENT
+                    df_restore.to_sql('operacoes', conn, if_exists='append', index=False)
+                    conn.commit()
                     conn.close()
                     st.success("✅ Dados restaurados com sucesso! O aplicativo será recarregado.")
                     import time
@@ -351,12 +362,15 @@ try:
                 })
 
             df_analise_ativos = df_valid_dates.groupby('ticker').apply(calc_metricas_ativo).reset_index()
-            # Formatar para exibição
+            # Ordenar primeiro pelos valores numéricos
+            df_analise_ativos = df_analise_ativos.sort_values(by='Volume Total Movimentado', ascending=False)
+
+            # Formatar para exibição após a ordenação
             df_analise_exib = df_analise_ativos.copy()
             df_analise_exib['Preço Médio Compra'] = df_analise_exib['Preço Médio Compra'].apply(lambda x: f"R$ {x:,.2f}")
             df_analise_exib['Preço Médio Venda'] = df_analise_exib['Preço Médio Venda'].apply(lambda x: f"R$ {x:,.2f}")
             df_analise_exib['Volume Total Movimentado'] = df_analise_exib['Volume Total Movimentado'].apply(lambda x: f"R$ {x:,.2f}")
-            st.dataframe(df_analise_exib.sort_values(by='Volume Total Movimentado', ascending=False), use_container_width=True)
+            st.dataframe(df_analise_exib, use_container_width=True)
 
             st.markdown("#### Histórico Bruto de Operações")
             st.dataframe(df_operacoes.sort_values(by='id', ascending=False), use_container_width=True)
