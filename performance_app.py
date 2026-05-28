@@ -38,43 +38,62 @@ st.markdown('<h3 class="section-header">📁 Importar Notas de Corretagem</h3>',
 
 uploaded_file = st.file_uploader("Faça upload do seu arquivo CSV com as operações", type=["csv"])
 
+is_santander = st.checkbox("Arquivo no padrão Santander (pular primeiras 5 linhas de metadados)?", value=True)
+
 if uploaded_file is not None:
     try:
-        # Tenta ler o CSV
-        try:
-            df_upload = pd.read_csv(uploaded_file, sep=None, engine='python')
-        except UnicodeDecodeError:
-            uploaded_file.seek(0)
-            df_upload = pd.read_csv(uploaded_file, sep=None, engine='python', encoding='latin1')
+        if is_santander:
+            try:
+                df_upload = pd.read_csv(uploaded_file, sep=';', skiprows=5, encoding='utf-8')
+            except UnicodeDecodeError:
+                uploaded_file.seek(0)
+                df_upload = pd.read_csv(uploaded_file, sep=';', skiprows=5, encoding='latin1')
+        else:
+            try:
+                df_upload = pd.read_csv(uploaded_file, sep=None, engine='python')
+            except UnicodeDecodeError:
+                uploaded_file.seek(0)
+                df_upload = pd.read_csv(uploaded_file, sep=None, engine='python', encoding='latin1')
 
         st.write("Visualização dos dados lidos:")
         st.dataframe(df_upload.head())
 
-        # Mapeamento genérico de colunas
-        st.markdown("#### Mapeie as colunas do seu CSV")
+        st.markdown("#### Salvar Operações")
+        if is_santander:
+            st.info("Padrão Santander selecionado: as colunas foram mapeadas automaticamente de acordo com as notas dessa corretora.")
+        else:
+            st.markdown("Mapeie as colunas do seu CSV (deixe vazio se não existir)")
+
         colunas_csv = df_upload.columns.tolist()
 
         c1, c2, c3 = st.columns(3)
         with c1:
-            col_data = st.selectbox("Coluna de Data", options=[''] + colunas_csv)
-            col_ticker = st.selectbox("Coluna de Ticker/Ativo", options=[''] + colunas_csv)
-            col_tipo = st.selectbox("Coluna de Tipo (Compra/Venda)", options=[''] + colunas_csv)
+            col_data = st.selectbox("Coluna de Data", options=[''] + colunas_csv, index=colunas_csv.index('Abertura')+1 if is_santander and 'Abertura' in colunas_csv else 0)
+            col_ticker = st.selectbox("Coluna de Ticker/Ativo", options=[''] + colunas_csv, index=colunas_csv.index('Ativo')+1 if is_santander and 'Ativo' in colunas_csv else 0)
+            col_tipo = st.selectbox("Coluna de Tipo (Compra/Venda)", options=[''] + colunas_csv, index=colunas_csv.index('Lado')+1 if is_santander and 'Lado' in colunas_csv else 0)
         with c2:
-            col_qtd = st.selectbox("Coluna de Quantidade", options=[''] + colunas_csv)
-            col_preco = st.selectbox("Coluna de Preço", options=[''] + colunas_csv)
+            col_qtd_c = st.selectbox("Qtd Compra (Santander) ou Qtd", options=[''] + colunas_csv, index=colunas_csv.index('Qtd Compra')+1 if is_santander and 'Qtd Compra' in colunas_csv else 0)
+            col_qtd_v = st.selectbox("Qtd Venda (Santander)", options=[''] + colunas_csv, index=colunas_csv.index('Qtd Venda')+1 if is_santander and 'Qtd Venda' in colunas_csv else 0)
+            col_preco_c = st.selectbox("Preço Compra (Santander) ou Preço", options=[''] + colunas_csv, index=colunas_csv.index('Preço Compra')+1 if is_santander and 'Preço Compra' in colunas_csv else 0)
+            col_preco_v = st.selectbox("Preço Venda (Santander)", options=[''] + colunas_csv, index=colunas_csv.index('Preço Venda')+1 if is_santander and 'Preço Venda' in colunas_csv else 0)
         with c3:
             col_taxas = st.selectbox("Coluna de Taxas (Opcional)", options=[''] + colunas_csv)
-            col_total = st.selectbox("Coluna de Total (Opcional)", options=[''] + colunas_csv)
+            col_total = st.selectbox("Coluna de Total (Opcional)", options=[''] + colunas_csv, index=colunas_csv.index('Total')+1 if is_santander and 'Total' in colunas_csv else 0)
 
-        corretora_nome = st.text_input("Nome da Corretora (para organização)", value="Genérica")
+        corretora_nome = st.text_input("Nome da Corretora", value="Santander" if is_santander else "Genérica")
 
         if st.button("Salvar Operações no Banco de Dados"):
-            if col_data and col_ticker and col_tipo and col_qtd and col_preco:
+            if col_data and col_ticker and col_tipo and col_qtd_c and col_preco_c:
                 # Preparando dados
                 df_to_save = pd.DataFrame()
                 df_to_save['data'] = df_upload[col_data].astype(str)
                 df_to_save['ticker'] = df_upload[col_ticker].astype(str)
-                df_to_save['tipo'] = df_upload[col_tipo].astype(str)
+
+                # Adaptação para lógica de Santander 'C' e 'V'
+                if is_santander:
+                    df_to_save['tipo'] = df_upload[col_tipo].apply(lambda x: 'Compra' if str(x).strip().upper() == 'C' else 'Venda')
+                else:
+                    df_to_save['tipo'] = df_upload[col_tipo].astype(str)
 
                 # Limpeza de números
                 def clean_number(x):
@@ -85,8 +104,24 @@ if uploaded_file is not None:
                     try: return float(x)
                     except: return 0.0
 
-                df_to_save['quantidade'] = df_upload[col_qtd].apply(clean_number)
-                df_to_save['preco'] = df_upload[col_preco].apply(clean_number)
+                if is_santander:
+                    def get_qtd(row):
+                        if str(row[col_tipo]).strip().upper() == 'C':
+                            return row[col_qtd_c]
+                        else:
+                            return row[col_qtd_v]
+
+                    def get_preco(row):
+                        if str(row[col_tipo]).strip().upper() == 'C':
+                            return row[col_preco_c]
+                        else:
+                            return row[col_preco_v]
+
+                    df_to_save['quantidade'] = df_upload.apply(get_qtd, axis=1).apply(clean_number)
+                    df_to_save['preco'] = df_upload.apply(get_preco, axis=1).apply(clean_number)
+                else:
+                    df_to_save['quantidade'] = df_upload[col_qtd_c].apply(clean_number)
+                    df_to_save['preco'] = df_upload[col_preco_c].apply(clean_number)
 
                 if col_taxas: df_to_save['taxas'] = df_upload[col_taxas].apply(clean_number)
                 else: df_to_save['taxas'] = 0.0
@@ -102,7 +137,7 @@ if uploaded_file is not None:
                 conn.close()
                 st.success(f"✅ {len(df_to_save)} operações salvas com sucesso!")
             else:
-                st.error("Por favor, selecione as colunas obrigatórias (Data, Ticker, Tipo, Quantidade, Preço).")
+                st.error("Por favor, selecione as colunas obrigatórias.")
     except Exception as e:
         st.error(f"Erro ao ler o arquivo CSV: {str(e)}")
 
