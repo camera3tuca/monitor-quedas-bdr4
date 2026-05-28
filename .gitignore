@@ -1,0 +1,5 @@
+
+# Ignora dados de banco e dados pessoais
+portfolio.db
+notas_corretagem.csv
+load_csv.py
