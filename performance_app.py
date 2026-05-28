@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import plotly.express as px
+import os
+import glob
 
 # --- BANCO DE DADOS ---
 def init_db():
@@ -26,12 +28,84 @@ def init_db():
 # Inicializa o banco de dados
 conn = init_db()
 
+# --- AUTO-LOAD DADOS (PADRÃO SANTANDER) ---
+def auto_load_csvs():
+    if not os.path.exists('dados'):
+        return
+
+    csv_files = glob.glob('dados/*.csv')
+    if not csv_files:
+        return
+
+    conn_db = sqlite3.connect('portfolio.db')
+    df_existentes = pd.read_sql_query("SELECT data, ticker, tipo, quantidade, preco FROM operacoes", conn_db)
+
+    if not df_existentes.empty:
+        existentes_set = set(zip(df_existentes['data'].astype(str), df_existentes['ticker'].astype(str), df_existentes['tipo'].astype(str), df_existentes['quantidade'].astype(float), df_existentes['preco'].astype(float)))
+    else:
+        existentes_set = set()
+
+    novas_operacoes = []
+
+    def clean_number(x):
+        if pd.isna(x): return 0.0
+        if isinstance(x, (int, float)): return float(x)
+        x = str(x).replace('R$', '').replace(' ', '')
+        x = x.replace('.', '').replace(',', '.') if ',' in x else x
+        try: return float(x)
+        except: return 0.0
+
+    for file in csv_files:
+        try:
+            try:
+                df = pd.read_csv(file, sep=';', skiprows=5, encoding='utf-8')
+            except UnicodeDecodeError:
+                df = pd.read_csv(file, sep=';', skiprows=5, encoding='latin1')
+
+            if 'Abertura' in df.columns and 'Ativo' in df.columns and 'Lado' in df.columns:
+                for _, row in df.iterrows():
+                    data = str(row['Abertura'])
+                    ticker = str(row['Ativo'])
+                    tipo = 'Compra' if str(row['Lado']).strip().upper() == 'C' else 'Venda'
+
+                    qtd = clean_number(row['Qtd Compra'] if tipo == 'Compra' else row['Qtd Venda'])
+                    preco = clean_number(row['Preço Compra'] if tipo == 'Compra' else row['Preço Venda'])
+                    total = clean_number(row.get('Total', 0.0))
+                    if total == 0.0:
+                         total = qtd * preco
+
+                    op_key = (data, ticker, tipo, float(qtd), float(preco))
+                    if op_key not in existentes_set:
+                        novas_operacoes.append({
+                            'data': data,
+                            'ticker': ticker,
+                            'tipo': tipo,
+                            'quantidade': qtd,
+                            'preco': preco,
+                            'taxas': 0.0,
+                            'total': total,
+                            'corretora': 'Santander (Auto)'
+                        })
+                        existentes_set.add(op_key)
+        except Exception as e:
+            st.warning(f"Aviso: Não foi possível processar o arquivo automático '{file}'. Detalhes: {e}")
+
+    if novas_operacoes:
+        df_novas = pd.DataFrame(novas_operacoes)
+        df_novas.to_sql('operacoes', conn_db, if_exists='append', index=False)
+    conn_db.close()
+
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(
     page_title="Performance da Carteira",
     page_icon="📈",
     layout="wide"
 )
+
+# Executa auto-load apenas uma vez por sessão
+if 'auto_loaded' not in st.session_state:
+    auto_load_csvs()
+    st.session_state['auto_loaded'] = True
 
 st.markdown('<h1 class="main-title">📈 Performance da Carteira</h1>', unsafe_allow_html=True)
 st.markdown('<h3 class="section-header">📁 Importar Notas de Corretagem</h3>', unsafe_allow_html=True)
@@ -178,8 +252,17 @@ with col_rst:
                 df_restore = pd.read_csv(uploaded_backup)
                 # Verifica se as colunas essenciais existem no arquivo
                 if 'data' in df_restore.columns and 'ticker' in df_restore.columns and 'tipo' in df_restore.columns:
+                    # Garantir que não vamos inserir a coluna 'id' se ela vier do CSV,
+                    # para que o banco gere um novo ID através do AUTOINCREMENT.
+                    if 'id' in df_restore.columns:
+                        df_restore = df_restore.drop(columns=['id'])
+
                     conn = sqlite3.connect('portfolio.db')
-                    df_restore.to_sql('operacoes', conn, if_exists='replace', index=False)
+                    # Deleta todos os registros para não perder a estrutura original (PRIMARY KEY)
+                    conn.execute("DELETE FROM operacoes")
+                    # Faz o append preservando o schema com AUTOINCREMENT
+                    df_restore.to_sql('operacoes', conn, if_exists='append', index=False)
+                    conn.commit()
                     conn.close()
                     st.success("✅ Dados restaurados com sucesso! O aplicativo será recarregado.")
                     import time
@@ -216,24 +299,81 @@ try:
             df_valid_dates['tipo_norm'] = df_valid_dates['tipo_norm'].apply(lambda x: 'Compra' if x.startswith('C') else 'Venda' if x.startswith('V') else x)
             df_valid_dates['total_abs'] = df_valid_dates['total'].abs()
 
-            df_grouped = df_valid_dates.groupby(['mes_ano', 'tipo_norm'])['total_abs'].sum().reset_index()
+            # Resumo de Métricas
+            st.markdown("#### Resumo de Operações")
+            vol_compra = df_valid_dates[df_valid_dates['tipo_norm'] == 'Compra']['total_abs'].sum()
+            vol_venda = df_valid_dates[df_valid_dates['tipo_norm'] == 'Venda']['total_abs'].sum()
+            total_taxas = df_valid_dates['taxas'].sum()
 
-            fig = px.bar(df_grouped, x='mes_ano', y='total_abs', color='tipo_norm',
-                            title='Volume Financeiro (R$) por Mês',
-                            labels={'mes_ano': 'Mês', 'total_abs': 'Volume R$', 'tipo_norm': 'Operação'},
-                            barmode='group',
-                            color_discrete_map={'Compra': '#26a69a', 'Venda': '#ef5350'})
-            st.plotly_chart(fig, use_container_width=True)
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Total Comprado", f"R$ {vol_compra:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+            m2.metric("Total Vendido", f"R$ {vol_venda:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+            m3.metric("Total de Taxas", f"R$ {total_taxas:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
 
-            st.markdown("#### Ativos Mais Negociados (Volume)")
-            df_ativos = df_valid_dates.groupby('ticker')['total_abs'].sum().sort_values(ascending=False).head(10).reset_index()
-            fig2 = px.bar(df_ativos, x='ticker', y='total_abs',
-                            title='Top 10 Ativos por Volume Financeiro',
-                            labels={'ticker': 'Ativo', 'total_abs': 'Volume R$'})
-            st.plotly_chart(fig2, use_container_width=True)
+            # Gráficos de Volume
+            c1, c2 = st.columns(2)
+            with c1:
+                df_grouped = df_valid_dates.groupby(['mes_ano', 'tipo_norm'])['total_abs'].sum().reset_index()
+                fig = px.bar(df_grouped, x='mes_ano', y='total_abs', color='tipo_norm',
+                                title='Volume Financeiro (R$) por Mês',
+                                labels={'mes_ano': 'Mês', 'total_abs': 'Volume R$', 'tipo_norm': 'Operação'},
+                                barmode='group',
+                                color_discrete_map={'Compra': '#26a69a', 'Venda': '#ef5350'})
+                st.plotly_chart(fig, use_container_width=True)
 
-            st.markdown("#### Histórico de Operações")
-            st.dataframe(df_operacoes.sort_values(by='id', ascending=False))
+            with c2:
+                df_ativos = df_valid_dates.groupby('ticker')['total_abs'].sum().sort_values(ascending=False).head(10).reset_index()
+                fig2 = px.pie(df_ativos, names='ticker', values='total_abs',
+                                title='Top 10 Ativos (Distribuição de Volume)',
+                                hole=0.4)
+                st.plotly_chart(fig2, use_container_width=True)
+
+            # Evolução Temporal
+            df_evolucao = df_valid_dates.groupby(['data_dt', 'tipo_norm'])['total_abs'].sum().reset_index()
+            fig3 = px.line(df_evolucao, x='data_dt', y='total_abs', color='tipo_norm', markers=True,
+                           title='Evolução Diária de Operações',
+                           labels={'data_dt': 'Data', 'total_abs': 'Volume R$', 'tipo_norm': 'Operação'},
+                           color_discrete_map={'Compra': '#26a69a', 'Venda': '#ef5350'})
+            st.plotly_chart(fig3, use_container_width=True)
+
+            # Análise Detalhada por Ativo
+            st.markdown("#### Análise Detalhada por Ativo")
+
+            def calc_metricas_ativo(g):
+                compras = g[g['tipo_norm'] == 'Compra']
+                vendas = g[g['tipo_norm'] == 'Venda']
+                qtd_compra = compras['quantidade'].sum()
+                qtd_venda = vendas['quantidade'].sum()
+                vol_compra = compras['total_abs'].sum()
+                vol_venda = vendas['total_abs'].sum()
+
+                preco_medio_compra = vol_compra / qtd_compra if qtd_compra > 0 else 0
+                preco_medio_venda = vol_venda / qtd_venda if qtd_venda > 0 else 0
+
+                saldo_qtd = qtd_compra - qtd_venda
+
+                return pd.Series({
+                    'Qtd Comprada': qtd_compra,
+                    'Preço Médio Compra': preco_medio_compra,
+                    'Qtd Vendida': qtd_venda,
+                    'Preço Médio Venda': preco_medio_venda,
+                    'Saldo Quantidade': saldo_qtd,
+                    'Volume Total Movimentado': vol_compra + vol_venda
+                })
+
+            df_analise_ativos = df_valid_dates.groupby('ticker').apply(calc_metricas_ativo).reset_index()
+            # Ordenar primeiro pelos valores numéricos
+            df_analise_ativos = df_analise_ativos.sort_values(by='Volume Total Movimentado', ascending=False)
+
+            # Formatar para exibição após a ordenação
+            df_analise_exib = df_analise_ativos.copy()
+            df_analise_exib['Preço Médio Compra'] = df_analise_exib['Preço Médio Compra'].apply(lambda x: f"R$ {x:,.2f}")
+            df_analise_exib['Preço Médio Venda'] = df_analise_exib['Preço Médio Venda'].apply(lambda x: f"R$ {x:,.2f}")
+            df_analise_exib['Volume Total Movimentado'] = df_analise_exib['Volume Total Movimentado'].apply(lambda x: f"R$ {x:,.2f}")
+            st.dataframe(df_analise_exib, use_container_width=True)
+
+            st.markdown("#### Histórico Bruto de Operações")
+            st.dataframe(df_operacoes.sort_values(by='id', ascending=False), use_container_width=True)
         else:
             st.warning("Não foi possível processar as datas para gerar o gráfico mensal. Verifique o formato de data do seu CSV.")
             st.dataframe(df_operacoes)
