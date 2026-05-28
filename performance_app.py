@@ -142,6 +142,56 @@ if uploaded_file is not None:
         st.error(f"Erro ao ler o arquivo CSV: {str(e)}")
 
 st.markdown("---")
+st.markdown('<h3 class="section-header">💾 Backup e Restauração de Dados</h3>', unsafe_allow_html=True)
+
+col_bkp, col_rst = st.columns(2)
+
+with col_bkp:
+    st.markdown("#### Exportar Backup")
+    st.write("Baixe o histórico completo de operações registradas no banco de dados local.")
+    try:
+        conn = sqlite3.connect('portfolio.db')
+        df_backup = pd.read_sql_query("SELECT * FROM operacoes", conn)
+        conn.close()
+
+        if not df_backup.empty:
+            csv = df_backup.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Baixar Backup (CSV)",
+                data=csv,
+                file_name='portfolio_backup.csv',
+                mime='text/csv',
+            )
+        else:
+            st.info("Nenhuma operação para fazer backup.")
+    except Exception as e:
+        st.error(f"Erro ao gerar backup: {str(e)}")
+
+with col_rst:
+    st.markdown("#### Restaurar Backup")
+    st.write("Faça upload de um arquivo de backup CSV previamente baixado (portfolio_backup.csv) para restaurar os dados.")
+    uploaded_backup = st.file_uploader("Selecione o arquivo de backup", type=["csv"], key="backup_uploader")
+
+    if uploaded_backup is not None:
+        if st.button("Restaurar Dados"):
+            try:
+                df_restore = pd.read_csv(uploaded_backup)
+                # Verifica se as colunas essenciais existem no arquivo
+                if 'data' in df_restore.columns and 'ticker' in df_restore.columns and 'tipo' in df_restore.columns:
+                    conn = sqlite3.connect('portfolio.db')
+                    df_restore.to_sql('operacoes', conn, if_exists='replace', index=False)
+                    conn.close()
+                    st.success("✅ Dados restaurados com sucesso! O aplicativo será recarregado.")
+                    import time
+                    time.sleep(2)
+                    st.rerun()
+                else:
+                    st.error("Arquivo CSV inválido. Certifique-se de usar o arquivo exportado na ferramenta de backup.")
+            except Exception as e:
+                st.error(f"Erro ao restaurar backup: {str(e)}")
+
+
+st.markdown("---")
 st.markdown('<h3 class="section-header">📊 Dashboard de Performance</h3>', unsafe_allow_html=True)
 
 # Busca dados do banco para os gráficos
@@ -164,21 +214,22 @@ try:
         if not df_valid_dates.empty:
             df_valid_dates['tipo_norm'] = df_valid_dates['tipo'].str.upper().str.strip()
             df_valid_dates['tipo_norm'] = df_valid_dates['tipo_norm'].apply(lambda x: 'Compra' if x.startswith('C') else 'Venda' if x.startswith('V') else x)
+            df_valid_dates['total_abs'] = df_valid_dates['total'].abs()
 
-            df_grouped = df_valid_dates.groupby(['mes_ano', 'tipo_norm'])['total'].sum().reset_index()
+            df_grouped = df_valid_dates.groupby(['mes_ano', 'tipo_norm'])['total_abs'].sum().reset_index()
 
-            fig = px.bar(df_grouped, x='mes_ano', y='total', color='tipo_norm',
+            fig = px.bar(df_grouped, x='mes_ano', y='total_abs', color='tipo_norm',
                             title='Volume Financeiro (R$) por Mês',
-                            labels={'mes_ano': 'Mês', 'total': 'Volume R$', 'tipo_norm': 'Operação'},
+                            labels={'mes_ano': 'Mês', 'total_abs': 'Volume R$', 'tipo_norm': 'Operação'},
                             barmode='group',
                             color_discrete_map={'Compra': '#26a69a', 'Venda': '#ef5350'})
             st.plotly_chart(fig, use_container_width=True)
 
             st.markdown("#### Ativos Mais Negociados (Volume)")
-            df_ativos = df_valid_dates.groupby('ticker')['total'].sum().sort_values(ascending=False).head(10).reset_index()
-            fig2 = px.bar(df_ativos, x='ticker', y='total',
+            df_ativos = df_valid_dates.groupby('ticker')['total_abs'].sum().sort_values(ascending=False).head(10).reset_index()
+            fig2 = px.bar(df_ativos, x='ticker', y='total_abs',
                             title='Top 10 Ativos por Volume Financeiro',
-                            labels={'ticker': 'Ativo', 'total': 'Volume R$'})
+                            labels={'ticker': 'Ativo', 'total_abs': 'Volume R$'})
             st.plotly_chart(fig2, use_container_width=True)
 
             st.markdown("#### Histórico de Operações")
